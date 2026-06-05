@@ -1,0 +1,6 @@
+[package]
+name = "ternary-quorum"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Distributed decision making with ternary voting and configurable thresholds"
