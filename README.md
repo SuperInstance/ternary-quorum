@@ -84,3 +84,11 @@ Part of the SuperInstance ternary crate family. Works with `ternary-oracle` (mar
 ## License
 
 MIT
+
+## See Also
+- **ternary-consensus** — related
+- **ternary-voting** — related
+- **ternary-trust** — related
+- **ternary-captain** — related
+- **ternary-room** — related
+
