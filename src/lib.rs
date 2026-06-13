@@ -1,127 +1,297 @@
-//! Ternary quorum: distributed consensus using ternary voting with Byzantine tolerance.
+#![forbid(unsafe_code)]
 
-/// A node in the quorum
+//! Distributed decision making with ternary voting and configurable thresholds.
+
+/// A ternary vote: For, Against, or Abstain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ternary {
+    Neg = -1, // Against
+    Zero = 0, // Abstain
+    Pos = 1,  // For
+}
+
+impl Ternary {
+    pub fn from_i8(v: i8) -> Option<Self> {
+        match v {
+            -1 => Some(Ternary::Neg),
+            0 => Some(Ternary::Zero),
+            1 => Some(Ternary::Pos),
+            _ => None,
+        }
+    }
+
+    pub fn to_i8(self) -> i8 {
+        self as i8
+    }
+}
+
+/// Unique identifiers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AgentId(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProposalId(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RoundId(pub u64);
+
+/// A voting body with members and active proposals.
 #[derive(Clone, Debug)]
-pub struct Node {
-    pub id: usize,
-    pub vote: i8,
-    pub weight: f64,
-    pub byzantine: bool,
+pub struct Quorum {
+    pub members: Vec<AgentId>,
+    pub proposals: Vec<QuorumProposal>,
+    pub threshold: QuorumThreshold,
+    next_proposal_id: u64,
 }
 
-impl Node {
-    pub fn new(id: usize, vote: i8, weight: f64) -> Self {
-        Self { id, vote, weight, byzantine: false }
+impl Quorum {
+    pub fn new(threshold: QuorumThreshold) -> Self {
+        Quorum {
+            members: Vec::new(),
+            proposals: Vec::new(),
+            threshold,
+            next_proposal_id: 0,
+        }
+    }
+
+    pub fn add_member(&mut self, agent: AgentId) -> bool {
+        if self.members.contains(&agent) {
+            return false;
+        }
+        self.members.push(agent);
+        true
+    }
+
+    pub fn remove_member(&mut self, agent: AgentId) -> bool {
+        let before = self.members.len();
+        self.members.retain(|m| *m != agent);
+        self.members.len() < before
+    }
+
+    pub fn member_count(&self) -> usize {
+        self.members.len()
+    }
+
+    /// Submit a new proposal.
+    pub fn propose(&mut self, proposer: AgentId, description: &str) -> Option<ProposalId> {
+        if !self.members.contains(&proposer) {
+            return None;
+        }
+        let id = ProposalId(self.next_proposal_id);
+        self.next_proposal_id += 1;
+        self.proposals.push(QuorumProposal {
+            id,
+            proposer,
+            description: description.to_string(),
+            votes: Vec::new(),
+            status: ProposalStatus::Open,
+        });
+        Some(id)
+    }
+
+    pub fn proposal(&self, id: ProposalId) -> Option<&QuorumProposal> {
+        self.proposals.iter().find(|p| p.id == id)
+    }
+
+    pub fn proposal_mut(&mut self, id: ProposalId) -> Option<&mut QuorumProposal> {
+        self.proposals.iter_mut().find(|p| p.id == id)
     }
 }
 
-/// Quorum result
-#[derive(Debug, PartialEq)]
-pub struct QuorumResult {
-    pub decision: i8,
-    pub confidence: f64,
-    pub participation: f64,
+/// A proposal with ternary voting options.
+#[derive(Clone, Debug)]
+pub struct QuorumProposal {
+    pub id: ProposalId,
+    pub proposer: AgentId,
+    pub description: String,
+    pub votes: Vec<QuorumVote>,
+    pub status: ProposalStatus,
 }
 
-/// Run weighted majority vote
-pub fn weighted_vote(nodes: &[Node]) -> QuorumResult {
-    if nodes.is_empty() {
-        return QuorumResult { decision: 0, confidence: 0.0, participation: 0.0 };
-    }
-    let total_weight: f64 = nodes.iter().map(|n| n.weight).sum();
-    let weighted_sum: f64 = nodes.iter().map(|n| n.vote as f64 * n.weight).sum();
-    let participation = nodes.len() as f64; // all participated
-    
-    let decision = if weighted_sum > 0.0 { 1 } else if weighted_sum < 0.0 { -1 } else { 0 };
-    let confidence = if total_weight > 0.0 { weighted_sum.abs() / total_weight } else { 0.0 };
-    
-    QuorumResult { decision, confidence, participation }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalStatus {
+    Open,
+    Accepted,
+    Rejected,
+    Expired,
 }
 
-/// Two-phase commit: prepare and commit
-pub struct TwoPhaseCommit {
-    pub nodes: Vec<Node>,
-    pub prepared: Vec<bool>,
-    pub committed: Vec<bool>,
+/// A vote cast by an agent.
+#[derive(Clone, Debug)]
+pub struct QuorumVote {
+    pub voter: AgentId,
+    pub vote: Ternary,
+    pub round: RoundId,
 }
 
-impl TwoPhaseCommit {
-    pub fn new(nodes: Vec<Node>) -> Self {
-        let n = nodes.len();
-        Self { nodes, prepared: vec![false; n], committed: vec![false; n] }
+impl QuorumVote {
+    pub fn new(voter: AgentId, vote: Ternary, round: RoundId) -> Self {
+        QuorumVote { voter, vote, round }
     }
 
-    /// Phase 1: Prepare — each node votes
-    pub fn prepare(&mut self, proposal: i8) -> bool {
-        for (i, node) in self.nodes.iter_mut().enumerate() {
-            if node.byzantine {
-                self.prepared[i] = (i % 2 == 0); // byzantine: random
-            } else {
-                self.prepared[i] = true; // honest nodes agree to reasonable proposals
+    /// Cast a vote on a proposal. Returns false if voter isn't a member or already voted this round.
+    pub fn cast(quorum: &mut Quorum, proposal_id: ProposalId, voter: AgentId, vote: Ternary, round: RoundId) -> bool {
+        if !quorum.members.contains(&voter) {
+            return false;
+        }
+        if let Some(proposal) = quorum.proposal_mut(proposal_id) {
+            if proposal.status != ProposalStatus::Open {
+                return false;
             }
-        }
-        let quorum = self.prepared.iter().filter(|&&p| p).count();
-        quorum * 2 > self.nodes.len() // majority
-    }
-
-    /// Phase 2: Commit
-    pub fn commit(&mut self) -> i8 {
-        let quorum = self.prepared.iter().filter(|&&p| p).count();
-        if quorum * 2 <= self.nodes.len() { return 0; }
-        for i in 0..self.nodes.len() {
-            self.committed[i] = self.prepared[i];
-        }
-        // Decision: weighted vote among prepared nodes
-        let mut pos = 0.0;
-        let mut neg = 0.0;
-        for (i, node) in self.nodes.iter().enumerate() {
-            if self.prepared[i] {
-                if node.vote > 0 { pos += node.weight; }
-                else if node.vote < 0 { neg += node.weight; }
+            // Check if already voted in this round
+            if proposal.votes.iter().any(|v| v.voter == voter && v.round == round) {
+                return false;
             }
+            proposal.votes.push(QuorumVote::new(voter, vote, round));
+            return true;
         }
-        if pos > neg { 1 } else if neg > pos { -1 } else { 0 }
+        false
     }
 }
 
-/// Byzantine tolerant quorum: works with up to f = (n-1)/3 faulty nodes
-pub fn byzantine_quorum(nodes: &[Node]) -> QuorumResult {
-    let n = nodes.len();
-    let f = (n - 1) / 3; // max tolerated faults
-    let honest_count = n - nodes.iter().filter(|n| n.byzantine).count().min(f);
-    
-    if honest_count * 3 < n * 2 {
-        return QuorumResult { decision: 0, confidence: 0.0, participation: 0.0 };
-    }
-
-    // Filter out suspected byzantine (extreme outliers)
-    let honest_nodes: Vec<&Node> = nodes.iter().filter(|n| !n.byzantine).collect();
-    weighted_vote(&honest_nodes)
+/// Configurable majority threshold.
+#[derive(Clone, Copy, Debug)]
+pub struct QuorumThreshold {
+    /// Fraction of non-abstain votes needed to pass (0.0 to 1.0).
+    pub majority_fraction: u32, // Stored as parts per thousand
+    /// Minimum number of votes required (including abstains).
+    pub min_votes: usize,
 }
 
-/// Raft-like leader election with ternary votes
-pub struct LeaderElection {
-    pub nodes: Vec<Node>,
-    pub term: usize,
-    pub leader: Option<usize>,
-}
-
-impl LeaderElection {
-    pub fn new(nodes: Vec<Node>) -> Self {
-        Self { nodes, term: 0, leader: None }
+impl QuorumThreshold {
+    pub fn simple_majority() -> Self {
+        QuorumThreshold {
+            majority_fraction: 500, // 50%
+            min_votes: 1,
+        }
     }
 
-    pub fn elect(&mut self) -> Option<usize> {
-        self.term += 1;
-        let result = weighted_vote(&self.nodes);
-        if result.confidence > 0.5 {
-            // Find the node whose vote matches the decision
-            let leader = self.nodes.iter().find(|n| n.vote == result.decision).map(|n| n.id);
-            self.leader = leader;
-            leader
+    pub fn super_majority() -> Self {
+        QuorumThreshold {
+            majority_fraction: 667, // ~66.7%
+            min_votes: 1,
+        }
+    }
+
+    pub fn unanimous() -> Self {
+        QuorumThreshold {
+            majority_fraction: 1000, // 100%
+            min_votes: 1,
+        }
+    }
+
+    pub fn custom(majority_fraction: u32, min_votes: usize) -> Self {
+        QuorumThreshold {
+            majority_fraction: majority_fraction.min(1000),
+            min_votes,
+        }
+    }
+
+    /// Check if a vote count meets the threshold.
+    pub fn is_met(&self, for_votes: usize, against_votes: usize, abstain_votes: usize) -> bool {
+        let total_votes = for_votes + against_votes + abstain_votes;
+        if total_votes < self.min_votes {
+            return false;
+        }
+        let decisive = for_votes + against_votes;
+        if decisive == 0 {
+            return false;
+        }
+        let ratio = (for_votes as u32 * 1000) / decisive as u32;
+        ratio >= self.majority_fraction
+    }
+}
+
+/// Multi-round voting with escalation.
+#[derive(Clone, Debug)]
+pub struct QuorumRound {
+    pub current_round: RoundId,
+    pub max_rounds: u32,
+    pub results: Vec<RoundResult>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RoundResult {
+    pub round: RoundId,
+    pub for_votes: usize,
+    pub against_votes: usize,
+    pub abstain_votes: usize,
+    pub outcome: Option<ProposalStatus>,
+}
+
+impl QuorumRound {
+    pub fn new(max_rounds: u32) -> Self {
+        QuorumRound {
+            current_round: RoundId(0),
+            max_rounds,
+            results: Vec::new(),
+        }
+    }
+
+    /// Advance to the next round.
+    pub fn advance(&mut self) -> bool {
+        if (self.current_round.0 as u32) < self.max_rounds {
+            self.current_round = RoundId(self.current_round.0 + 1);
+            true
         } else {
-            self.leader = None;
-            None
+            false
+        }
+    }
+
+    /// Record the result of a round.
+    pub fn record_result(&mut self, for_votes: usize, against_votes: usize, abstain_votes: usize, threshold: &QuorumThreshold) -> ProposalStatus {
+        let outcome = if threshold.is_met(for_votes, against_votes, abstain_votes) {
+            ProposalStatus::Accepted
+        } else if for_votes > against_votes && !threshold.is_met(for_votes, against_votes, abstain_votes) {
+            // Not enough for threshold but plurality for — try another round
+            ProposalStatus::Open
+        } else if against_votes > for_votes {
+            ProposalStatus::Rejected
+        } else {
+            ProposalStatus::Open
+        };
+        self.results.push(RoundResult {
+            round: self.current_round,
+            for_votes,
+            against_votes,
+            abstain_votes,
+            outcome: Some(outcome),
+        });
+        outcome
+    }
+
+    pub fn round_count(&self) -> usize {
+        self.results.len()
+    }
+}
+
+/// Reach consensus through the quorum process.
+#[derive(Clone, Debug)]
+pub struct QuorumConsensus;
+
+impl QuorumConsensus {
+    /// Tally votes for a proposal and check if threshold is met.
+    pub fn tally(proposal: &QuorumProposal, threshold: &QuorumThreshold) -> (usize, usize, usize) {
+        let for_votes = proposal.votes.iter().filter(|v| v.vote == Ternary::Pos).count();
+        let against = proposal.votes.iter().filter(|v| v.vote == Ternary::Neg).count();
+        let abstain = proposal.votes.iter().filter(|v| v.vote == Ternary::Zero).count();
+        (for_votes, against, abstain)
+    }
+
+    /// Check if consensus has been reached.
+    pub fn is_consensus(proposal: &QuorumProposal, threshold: &QuorumThreshold) -> ProposalStatus {
+        let (for_votes, against, abstain) = Self::tally(proposal, threshold);
+        if threshold.is_met(for_votes, against, abstain) {
+            ProposalStatus::Accepted
+        } else if against > for_votes && (for_votes + against) > 0 {
+            let ratio = (against as u32 * 1000) / (for_votes + against) as u32;
+            if ratio >= threshold.majority_fraction {
+                ProposalStatus::Rejected
+            } else {
+                ProposalStatus::Open
+            }
+        } else {
+            ProposalStatus::Open
         }
     }
 }
@@ -131,90 +301,180 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_weighted_vote_accept() {
-        let nodes = vec![
-            Node::new(0, 1, 1.0),
-            Node::new(1, 1, 1.0),
-            Node::new(2, -1, 1.0),
-        ];
-        let result = weighted_vote(&nodes);
-        assert_eq!(result.decision, 1);
-        assert!(result.confidence > 0.0);
+    fn test_ternary_values() {
+        assert_eq!(Ternary::from_i8(-1), Some(Ternary::Neg));
+        assert_eq!(Ternary::from_i8(0), Some(Ternary::Zero));
+        assert_eq!(Ternary::from_i8(1), Some(Ternary::Pos));
     }
 
     #[test]
-    fn test_weighted_vote_reject() {
-        let nodes = vec![
-            Node::new(0, -1, 2.0),
-            Node::new(1, 1, 1.0),
-        ];
-        let result = weighted_vote(&nodes);
-        assert_eq!(result.decision, -1);
+    fn test_quorum_add_member() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        assert!(q.add_member(AgentId(1)));
+        assert_eq!(q.member_count(), 1);
     }
 
     #[test]
-    fn test_weighted_vote_tie() {
-        let nodes = vec![
-            Node::new(0, 1, 1.0),
-            Node::new(1, -1, 1.0),
-        ];
-        let result = weighted_vote(&nodes);
-        assert_eq!(result.decision, 0);
+    fn test_quorum_no_duplicate_member() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        assert!(q.add_member(AgentId(1)));
+        assert!(!q.add_member(AgentId(1)));
     }
 
     #[test]
-    fn test_two_phase_commit() {
-        let nodes = vec![
-            Node::new(0, 1, 1.0),
-            Node::new(1, 1, 1.0),
-            Node::new(2, -1, 1.0),
-        ];
-        let mut tpc = TwoPhaseCommit::new(nodes);
-        assert!(tpc.prepare(1));
-        let decision = tpc.commit();
-        assert_eq!(decision, 1);
+    fn test_quorum_remove_member() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        assert!(q.remove_member(AgentId(1)));
+        assert_eq!(q.member_count(), 0);
     }
 
     #[test]
-    fn test_byzantine_tolerance() {
-        let mut nodes = vec![
-            Node::new(0, 1, 1.0),
-            Node::new(1, 1, 1.0),
-            Node::new(2, 1, 1.0),
-            Node::new(3, -1, 1.0),
-        ];
-        nodes[3].byzantine = true;
-        let result = byzantine_quorum(&nodes);
-        assert_eq!(result.decision, 1);
+    fn test_quorum_propose() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        let pid = q.propose(AgentId(1), "Deploy to prod?");
+        assert!(pid.is_some());
+        assert!(q.proposal(pid.unwrap()).is_some());
     }
 
     #[test]
-    fn test_leader_election() {
-        let nodes = vec![
-            Node::new(0, 1, 1.0),
-            Node::new(1, 1, 1.0),
-            Node::new(2, 0, 1.0),
-        ];
-        let mut le = LeaderElection::new(nodes);
-        let leader = le.elect();
-        assert!(leader.is_some());
-        assert_eq!(le.term, 1);
+    fn test_quorum_propose_non_member_fails() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        let pid = q.propose(AgentId(99), "Test?");
+        assert!(pid.is_none());
     }
 
     #[test]
-    fn test_empty_quorum() {
-        let result = weighted_vote(&[]);
-        assert_eq!(result.decision, 0);
+    fn test_vote_cast() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        q.add_member(AgentId(2));
+        let pid = q.propose(AgentId(1), "Test?").unwrap();
+        assert!(QuorumVote::cast(&mut q, pid, AgentId(1), Ternary::Pos, RoundId(0)));
+        assert!(QuorumVote::cast(&mut q, pid, AgentId(2), Ternary::Neg, RoundId(0)));
     }
 
     #[test]
-    fn test_high_confidence() {
-        let nodes = vec![
-            Node::new(0, 1, 1.0),
-            Node::new(1, 1, 1.0),
-            Node::new(2, 1, 1.0),
-        ];
-        let result = weighted_vote(&nodes);
-        assert!((result.confidence - 1.0).abs() < 1e-10);
+    fn test_vote_cast_twice_same_round_fails() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        let pid = q.propose(AgentId(1), "Test?").unwrap();
+        assert!(QuorumVote::cast(&mut q, pid, AgentId(1), Ternary::Pos, RoundId(0)));
+        assert!(!QuorumVote::cast(&mut q, pid, AgentId(1), Ternary::Neg, RoundId(0)));
+    }
+
+    #[test]
+    fn test_vote_non_member_fails() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        let pid = q.propose(AgentId(1), "Test?").unwrap();
+        assert!(!QuorumVote::cast(&mut q, pid, AgentId(99), Ternary::Pos, RoundId(0)));
+    }
+
+    #[test]
+    fn test_threshold_simple_majority() {
+        let t = QuorumThreshold::simple_majority();
+        assert!(t.is_met(3, 2, 1)); // 3/5 = 60% > 50%
+        assert!(!t.is_met(2, 3, 1)); // 2/5 = 40% < 50%
+    }
+
+    #[test]
+    fn test_threshold_super_majority() {
+        let t = QuorumThreshold::super_majority();
+        assert!(t.is_met(7, 2, 1)); // 7/9 = 77.7% > 66.7%
+        assert!(!t.is_met(5, 3, 2)); // 5/8 = 62.5% < 66.7%
+    }
+
+    #[test]
+    fn test_threshold_unanimous() {
+        let t = QuorumThreshold::unanimous();
+        assert!(t.is_met(5, 0, 0)); // 100%
+        assert!(!t.is_met(4, 1, 0)); // 80%
+    }
+
+    #[test]
+    fn test_threshold_min_votes() {
+        let t = QuorumThreshold::custom(500, 5);
+        assert!(!t.is_met(3, 0, 0)); // Only 3 votes, need 5
+    }
+
+    #[test]
+    fn test_threshold_no_decisive_votes() {
+        let t = QuorumThreshold::simple_majority();
+        assert!(!t.is_met(0, 0, 5)); // All abstain, no decisive votes
+    }
+
+    #[test]
+    fn test_round_advance() {
+        let mut round = QuorumRound::new(3);
+        assert!(round.advance());
+        assert_eq!(round.current_round, RoundId(1));
+        assert!(round.advance());
+        assert!(round.advance());
+        assert!(!round.advance()); // maxed out
+    }
+
+    #[test]
+    fn test_round_record_result() {
+        let mut round = QuorumRound::new(3);
+        let threshold = QuorumThreshold::simple_majority();
+        let result = round.record_result(3, 1, 1, &threshold);
+        assert_eq!(result, ProposalStatus::Accepted);
+    }
+
+    #[test]
+    fn test_round_record_rejection() {
+        let mut round = QuorumRound::new(3);
+        let threshold = QuorumThreshold::simple_majority();
+        let result = round.record_result(1, 3, 1, &threshold);
+        assert_eq!(result, ProposalStatus::Rejected);
+    }
+
+    #[test]
+    fn test_consensus_tally() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        q.add_member(AgentId(2));
+        q.add_member(AgentId(3));
+        let pid = q.propose(AgentId(1), "Test?").unwrap();
+        QuorumVote::cast(&mut q, pid, AgentId(1), Ternary::Pos, RoundId(0));
+        QuorumVote::cast(&mut q, pid, AgentId(2), Ternary::Pos, RoundId(0));
+        QuorumVote::cast(&mut q, pid, AgentId(3), Ternary::Neg, RoundId(0));
+        let proposal = q.proposal(pid).unwrap();
+        let (f, a, ab) = QuorumConsensus::tally(proposal, &q.threshold);
+        assert_eq!(f, 2);
+        assert_eq!(a, 1);
+        assert_eq!(ab, 0);
+    }
+
+    #[test]
+    fn test_consensus_is_reached() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        q.add_member(AgentId(2));
+        q.add_member(AgentId(3));
+        let pid = q.propose(AgentId(1), "Test?").unwrap();
+        QuorumVote::cast(&mut q, pid, AgentId(1), Ternary::Pos, RoundId(0));
+        QuorumVote::cast(&mut q, pid, AgentId(2), Ternary::Pos, RoundId(0));
+        QuorumVote::cast(&mut q, pid, AgentId(3), Ternary::Neg, RoundId(0));
+        let proposal = q.proposal(pid).unwrap();
+        let status = QuorumConsensus::is_consensus(proposal, &q.threshold);
+        assert_eq!(status, ProposalStatus::Accepted);
+    }
+
+    #[test]
+    fn test_consensus_not_reached() {
+        let mut q = Quorum::new(QuorumThreshold::super_majority());
+        q.add_member(AgentId(1));
+        q.add_member(AgentId(2));
+        q.add_member(AgentId(3));
+        let pid = q.propose(AgentId(1), "Test?").unwrap();
+        QuorumVote::cast(&mut q, pid, AgentId(1), Ternary::Pos, RoundId(0));
+        QuorumVote::cast(&mut q, pid, AgentId(2), Ternary::Neg, RoundId(0));
+        QuorumVote::cast(&mut q, pid, AgentId(3), Ternary::Zero, RoundId(0));
+        let proposal = q.proposal(pid).unwrap();
+        let status = QuorumConsensus::is_consensus(proposal, &q.threshold);
+        assert_eq!(status, ProposalStatus::Open);
     }
 }
