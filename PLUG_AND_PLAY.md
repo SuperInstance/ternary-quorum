@@ -11,17 +11,14 @@ ternary_quorum = "0.1.0"
 
 ## Feature Flags
 
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `std` | yes | Standard library |
-| `alloc` | yes | Allocator support |
+This crate has no optional feature flags. It uses the Rust standard library.
 
 ## Integration
 
 Import `ternary_quorum` in your project to access the functionality.
 
-```
-use ternary_quorum::{};
+```rust
+use ternary_quorum::{Quorum, QuorumThreshold, AgentId, Ternary};
 ```
 
 ## Compatibility

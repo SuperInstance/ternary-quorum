@@ -31,8 +31,10 @@ The ternary principle: **0 is not nothing** — it is a meaningful neutral state
 ## Quick Example
 
 ```
-use ternary_quorum::AgentId;
-let instance = AgentId::new();
+use ternary_quorum::{AgentId, Quorum, QuorumThreshold};
+
+let mut quorum = Quorum::new(QuorumThreshold::simple_majority());
+quorum.add_member(AgentId(1));
 ```
 
 ## Running Tests
