@@ -130,7 +130,13 @@ impl QuorumVote {
     }
 
     /// Cast a vote on a proposal. Returns false if voter isn't a member or already voted this round.
-    pub fn cast(quorum: &mut Quorum, proposal_id: ProposalId, voter: AgentId, vote: Ternary, round: RoundId) -> bool {
+    pub fn cast(
+        quorum: &mut Quorum,
+        proposal_id: ProposalId,
+        voter: AgentId,
+        vote: Ternary,
+        round: RoundId,
+    ) -> bool {
         if !quorum.members.contains(&voter) {
             return false;
         }
@@ -139,7 +145,11 @@ impl QuorumVote {
                 return false;
             }
             // Check if already voted in this round
-            if proposal.votes.iter().any(|v| v.voter == voter && v.round == round) {
+            if proposal
+                .votes
+                .iter()
+                .any(|v| v.voter == voter && v.round == round)
+            {
                 return false;
             }
             proposal.votes.push(QuorumVote::new(voter, vote, round));
@@ -239,14 +249,29 @@ impl QuorumRound {
     }
 
     /// Record the result of a round.
-    pub fn record_result(&mut self, for_votes: usize, against_votes: usize, abstain_votes: usize, threshold: &QuorumThreshold) -> ProposalStatus {
+    pub fn record_result(
+        &mut self,
+        for_votes: usize,
+        against_votes: usize,
+        abstain_votes: usize,
+        threshold: &QuorumThreshold,
+    ) -> ProposalStatus {
         let outcome = if threshold.is_met(for_votes, against_votes, abstain_votes) {
             ProposalStatus::Accepted
-        } else if for_votes > against_votes && !threshold.is_met(for_votes, against_votes, abstain_votes) {
+        } else if for_votes > against_votes {
             // Not enough for threshold but plurality for — try another round
             ProposalStatus::Open
         } else if against_votes > for_votes {
-            ProposalStatus::Rejected
+            // Reject only if the against-side also meets the threshold fraction,
+            // consistent with QuorumConsensus::is_consensus and the README spec:
+            // "If against > for and meets threshold → Rejected."
+            let decisive = for_votes + against_votes;
+            let ratio = (against_votes as u32 * 1000) / decisive as u32;
+            if ratio >= threshold.majority_fraction {
+                ProposalStatus::Rejected
+            } else {
+                ProposalStatus::Open
+            }
         } else {
             ProposalStatus::Open
         };
@@ -270,17 +295,29 @@ impl QuorumRound {
 pub struct QuorumConsensus;
 
 impl QuorumConsensus {
-    /// Tally votes for a proposal and check if threshold is met.
-    pub fn tally(proposal: &QuorumProposal, threshold: &QuorumThreshold) -> (usize, usize, usize) {
-        let for_votes = proposal.votes.iter().filter(|v| v.vote == Ternary::Pos).count();
-        let against = proposal.votes.iter().filter(|v| v.vote == Ternary::Neg).count();
-        let abstain = proposal.votes.iter().filter(|v| v.vote == Ternary::Zero).count();
+    /// Tally votes for a proposal, returning (for, against, abstain) counts.
+    pub fn tally(proposal: &QuorumProposal) -> (usize, usize, usize) {
+        let for_votes = proposal
+            .votes
+            .iter()
+            .filter(|v| v.vote == Ternary::Pos)
+            .count();
+        let against = proposal
+            .votes
+            .iter()
+            .filter(|v| v.vote == Ternary::Neg)
+            .count();
+        let abstain = proposal
+            .votes
+            .iter()
+            .filter(|v| v.vote == Ternary::Zero)
+            .count();
         (for_votes, against, abstain)
     }
 
     /// Check if consensus has been reached.
     pub fn is_consensus(proposal: &QuorumProposal, threshold: &QuorumThreshold) -> ProposalStatus {
-        let (for_votes, against, abstain) = Self::tally(proposal, threshold);
+        let (for_votes, against, abstain) = Self::tally(proposal);
         if threshold.is_met(for_votes, against, abstain) {
             ProposalStatus::Accepted
         } else if against > for_votes && (for_votes + against) > 0 {
@@ -351,8 +388,20 @@ mod tests {
         q.add_member(AgentId(1));
         q.add_member(AgentId(2));
         let pid = q.propose(AgentId(1), "Test?").unwrap();
-        assert!(QuorumVote::cast(&mut q, pid, AgentId(1), Ternary::Pos, RoundId(0)));
-        assert!(QuorumVote::cast(&mut q, pid, AgentId(2), Ternary::Neg, RoundId(0)));
+        assert!(QuorumVote::cast(
+            &mut q,
+            pid,
+            AgentId(1),
+            Ternary::Pos,
+            RoundId(0)
+        ));
+        assert!(QuorumVote::cast(
+            &mut q,
+            pid,
+            AgentId(2),
+            Ternary::Neg,
+            RoundId(0)
+        ));
     }
 
     #[test]
@@ -360,8 +409,20 @@ mod tests {
         let mut q = Quorum::new(QuorumThreshold::simple_majority());
         q.add_member(AgentId(1));
         let pid = q.propose(AgentId(1), "Test?").unwrap();
-        assert!(QuorumVote::cast(&mut q, pid, AgentId(1), Ternary::Pos, RoundId(0)));
-        assert!(!QuorumVote::cast(&mut q, pid, AgentId(1), Ternary::Neg, RoundId(0)));
+        assert!(QuorumVote::cast(
+            &mut q,
+            pid,
+            AgentId(1),
+            Ternary::Pos,
+            RoundId(0)
+        ));
+        assert!(!QuorumVote::cast(
+            &mut q,
+            pid,
+            AgentId(1),
+            Ternary::Neg,
+            RoundId(0)
+        ));
     }
 
     #[test]
@@ -369,7 +430,13 @@ mod tests {
         let mut q = Quorum::new(QuorumThreshold::simple_majority());
         q.add_member(AgentId(1));
         let pid = q.propose(AgentId(1), "Test?").unwrap();
-        assert!(!QuorumVote::cast(&mut q, pid, AgentId(99), Ternary::Pos, RoundId(0)));
+        assert!(!QuorumVote::cast(
+            &mut q,
+            pid,
+            AgentId(99),
+            Ternary::Pos,
+            RoundId(0)
+        ));
     }
 
     #[test]
@@ -442,7 +509,7 @@ mod tests {
         QuorumVote::cast(&mut q, pid, AgentId(2), Ternary::Pos, RoundId(0));
         QuorumVote::cast(&mut q, pid, AgentId(3), Ternary::Neg, RoundId(0));
         let proposal = q.proposal(pid).unwrap();
-        let (f, a, ab) = QuorumConsensus::tally(proposal, &q.threshold);
+        let (f, a, ab) = QuorumConsensus::tally(proposal);
         assert_eq!(f, 2);
         assert_eq!(a, 1);
         assert_eq!(ab, 0);
@@ -476,5 +543,186 @@ mod tests {
         let proposal = q.proposal(pid).unwrap();
         let status = QuorumConsensus::is_consensus(proposal, &q.threshold);
         assert_eq!(status, ProposalStatus::Open);
+    }
+
+    // --- Ternary round-trip and edge cases ---
+
+    #[test]
+    fn test_ternary_to_i8() {
+        assert_eq!(Ternary::Neg.to_i8(), -1);
+        assert_eq!(Ternary::Zero.to_i8(), 0);
+        assert_eq!(Ternary::Pos.to_i8(), 1);
+    }
+
+    #[test]
+    fn test_ternary_from_i8_roundtrip() {
+        for v in [-1i8, 0, 1] {
+            let t = Ternary::from_i8(v).unwrap();
+            assert_eq!(t.to_i8(), v);
+        }
+    }
+
+    #[test]
+    fn test_ternary_from_i8_invalid() {
+        assert_eq!(Ternary::from_i8(2), None);
+        assert_eq!(Ternary::from_i8(-2), None);
+        assert_eq!(Ternary::from_i8(127), None);
+        assert_eq!(Ternary::from_i8(-128), None);
+    }
+
+    // --- Threshold boundary precision ---
+
+    #[test]
+    fn test_threshold_boundary_simple_majority_exact() {
+        let t = QuorumThreshold::simple_majority();
+        // Exactly 50% (a tie) — ratio = 500 >= 500 → passes with >= semantics
+        assert!(t.is_met(1, 1, 0));
+        assert!(t.is_met(5, 5, 10));
+        // Just below: 1/3 = 333 < 500
+        assert!(!t.is_met(1, 2, 0));
+    }
+
+    #[test]
+    fn test_threshold_boundary_super_majority() {
+        let t = QuorumThreshold::super_majority();
+        // 2/3 decisive: ratio = 2000/3 = 666 < 667 → fails (integer truncation)
+        assert!(!t.is_met(2, 1, 0));
+        // 3/4 decisive: ratio = 3000/4 = 750 >= 667 → passes
+        assert!(t.is_met(3, 1, 0));
+    }
+
+    #[test]
+    fn test_threshold_custom_clamping() {
+        // majority_fraction > 1000 should be clamped to 1000
+        let t = QuorumThreshold::custom(1500, 1);
+        assert!(t.is_met(1, 0, 0)); // 100% passes
+        assert!(!t.is_met(1, 1, 0)); // 50% < 100% fails
+    }
+
+    #[test]
+    fn test_threshold_unanimous_with_abstains() {
+        let t = QuorumThreshold::unanimous();
+        // All decisive votes For → 100% → passes even with abstains
+        assert!(t.is_met(3, 0, 2));
+        // One Against → 75% < 100% → fails
+        assert!(!t.is_met(3, 1, 0));
+    }
+
+    // --- Vote edge cases ---
+
+    #[test]
+    fn test_vote_cast_on_nonexistent_proposal() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        assert!(!QuorumVote::cast(
+            &mut q,
+            ProposalId(999),
+            AgentId(1),
+            Ternary::Pos,
+            RoundId(0)
+        ));
+    }
+
+    #[test]
+    fn test_vote_cast_on_closed_proposal() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        q.add_member(AgentId(2));
+        let pid = q.propose(AgentId(1), "Test?").unwrap();
+        q.proposal_mut(pid).unwrap().status = ProposalStatus::Accepted;
+        assert!(!QuorumVote::cast(
+            &mut q,
+            pid,
+            AgentId(2),
+            Ternary::Pos,
+            RoundId(0)
+        ));
+    }
+
+    #[test]
+    fn test_vote_cast_different_rounds_allowed() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        let pid = q.propose(AgentId(1), "Test?").unwrap();
+        assert!(QuorumVote::cast(
+            &mut q,
+            pid,
+            AgentId(1),
+            Ternary::Pos,
+            RoundId(0)
+        ));
+        // Same voter can cast again in a new round
+        assert!(QuorumVote::cast(
+            &mut q,
+            pid,
+            AgentId(1),
+            Ternary::Neg,
+            RoundId(1)
+        ));
+    }
+
+    #[test]
+    fn test_remove_nonexistent_member() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        assert!(!q.remove_member(AgentId(99)));
+        assert_eq!(q.member_count(), 1);
+    }
+
+    #[test]
+    fn test_proposal_mut_updates_status() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        let pid = q.propose(AgentId(1), "Test?").unwrap();
+        q.proposal_mut(pid).unwrap().status = ProposalStatus::Expired;
+        assert_eq!(q.proposal(pid).unwrap().status, ProposalStatus::Expired);
+    }
+
+    // --- Consensus rejection path ---
+
+    #[test]
+    fn test_consensus_rejected() {
+        let mut q = Quorum::new(QuorumThreshold::simple_majority());
+        q.add_member(AgentId(1));
+        q.add_member(AgentId(2));
+        q.add_member(AgentId(3));
+        let pid = q.propose(AgentId(1), "Test?").unwrap();
+        QuorumVote::cast(&mut q, pid, AgentId(1), Ternary::Neg, RoundId(0));
+        QuorumVote::cast(&mut q, pid, AgentId(2), Ternary::Neg, RoundId(0));
+        QuorumVote::cast(&mut q, pid, AgentId(3), Ternary::Pos, RoundId(0));
+        let proposal = q.proposal(pid).unwrap();
+        let status = QuorumConsensus::is_consensus(proposal, &q.threshold);
+        assert_eq!(status, ProposalStatus::Rejected);
+    }
+
+    // --- record_result threshold-weighted rejection (regression tests) ---
+
+    #[test]
+    fn test_record_result_super_majority_below_threshold_stays_open() {
+        // Regression: record_result previously rejected on simple plurality
+        // (against > for) without checking the threshold fraction.
+        // With super_majority(667): 3 for / 4 against = 57.1% < 66.7% → Open
+        let mut round = QuorumRound::new(3);
+        let threshold = QuorumThreshold::super_majority();
+        let result = round.record_result(3, 4, 0, &threshold);
+        assert_eq!(result, ProposalStatus::Open);
+    }
+
+    #[test]
+    fn test_record_result_super_majority_above_threshold_rejects() {
+        // With super_majority(667): 2 for / 5 against = 71.4% >= 66.7% → Rejected
+        let mut round = QuorumRound::new(3);
+        let threshold = QuorumThreshold::super_majority();
+        let result = round.record_result(2, 5, 0, &threshold);
+        assert_eq!(result, ProposalStatus::Rejected);
+    }
+
+    #[test]
+    fn test_record_result_tie_stays_open() {
+        // for == against with super_majority: 1/2 = 50% < 66.7% → Open
+        let mut round = QuorumRound::new(3);
+        let threshold = QuorumThreshold::super_majority();
+        let result = round.record_result(1, 1, 0, &threshold);
+        assert_eq!(result, ProposalStatus::Open);
     }
 }
